@@ -145,11 +145,8 @@ jobs:
         uses: anthropics/claude-code-action@v1
         continue-on-error: true   # hybrid model — OAuth primary, API key fallback, failures don't break CI or email Waqas
         with:
-          # Primary: Claude Max OAuth token (counts against Waqas's Max-plan quota, not API billing).
-          # Fallback: Anthropic API key (when OAuth secret isn't set on this repo — kept as backup only).
-          # The action picks OAuth when both are present; if OAuth is empty/unset it uses the API key.
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Auth: handled by the Claude GitHub App installation on the eFone org
+          # (app_slug "claude", repo_selection "all"). No secret needed.
           # Allow Dependabot to trigger AI review (default blocks all bots).
           # The auto-merge workflow handles the actual merge for patch/minor bumps,
           # but we still want Claude to flag suspicious changes (e.g. malicious
