@@ -1,0 +1,235 @@
+name: AI code review
+
+# eFone Team-plan-substitute: every PR auto-reviewed by Claude with the
+# eFone Safety Rulebook + accumulated LEARNED RULES + per-directory OWNERSHIP
+# scoping applied. Uses the official anthropics/claude-code-action via Claude
+# GitHub App (org-level OAuth). Reviews count against Waqas's Claude Max quota.
+#
+# Three sources of guidance fetched at workflow-run time:
+#   1. Static Safety Rulebook (baked into this file)
+#   2. /api/rules/public — learned from approvals on control.efone.app
+#   3. /api/owners/public?repo=<this-repo> — per-directory ownership map
+#
+# Ownership gate: if the PR's changed files include any path the PR author does
+# NOT own (per the OWNERS map), Claude is told to end with
+# `BLOCK_MERGE: out-of-scope edit by @<author>` and the downstream gate fails.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Fetch learned rules from dashboard
+        id: fetch-rules
+        continue-on-error: true
+        run: |
+          set +e
+          BODY=$(curl -sf --max-time 8 https://control.efone.app/api/rules/public || echo '')
+          if [ -z "$BODY" ]; then
+            echo "rules_text=(no learned rules yet, or rules feed unreachable)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          FORMATTED=$(echo "$BODY" | jq -r '.rules // [] | .[:80] | .[] | "- [" + (.category // "general") + "] (decision was: " + (.decision // "?") + ")" + (if .auto_apply then " [AUTO-APPLY]" else "" end) + " " + (.text // "" | gsub("\n"; " ")) + (if .source_item_title then "  (learned from: " + (.source_item_title // "") + ")" else "" end)')
+          if [ -z "$FORMATTED" ]; then
+            FORMATTED="(no learned rules yet — review against static Rulebook only)"
+          fi
+          {
+            echo "rules_text<<RULES_EOF"
+            echo "$FORMATTED"
+            echo "RULES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Fetch ownership map + check scope of PR changes
+        id: scope-check
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set +e
+          OWNERS_JSON=$(curl -sf --max-time 8 "https://control.efone.app/api/owners/public?repo=$REPO_NAME" || echo '')
+          if [ -z "$OWNERS_JSON" ]; then
+            echo "scope_text=(ownership map unreachable — scope gating skipped this run)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          export OWNERS_BLOB=$(echo "$OWNERS_JSON" | jq -c '.owners // {}')
+          if [ "$OWNERS_BLOB" = "null" ] || [ "$OWNERS_BLOB" = "{}" ]; then
+            echo "scope_text=(no ownership scopes declared for $REPO_NAME — scope gate skipped)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          export CHANGED_FILES=$(gh pr view "$PR_NUMBER" --json files --jq '.files[].path' 2>/dev/null)
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "scope_text=(no changed files reported)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          OUT_OF_SCOPE=$(python3 - <<'PYEOF'
+          import fnmatch, json, os
+          owners = json.loads(os.environ["OWNERS_BLOB"])
+          author = os.environ["PR_AUTHOR"]
+          changed = [l.strip() for l in os.environ["CHANGED_FILES"].splitlines() if l.strip()]
+          globs = [g for g in owners.keys() if g != "default"]
+          # Longest first → more-specific scopes win over the catch-all "default"
+          globs.sort(key=lambda g: (-len(g), g))
+          out = []
+          for f in changed:
+              hit = None
+              for g in globs:
+                  pat = g.replace("/**/", "/*/").replace("/**", "/*").replace("**", "*")
+                  base = g.replace("/**", "").replace("**", "").rstrip("/")
+                  if fnmatch.fnmatch(f, pat) or (base and f.startswith(base + "/")):
+                      hit = owners[g]; break
+              if hit is None:
+                  hit = owners.get("default", [])
+              if author.lower() not in [o.lower() for o in hit]:
+                  out.append("- " + f + "  (owned by: " + ", ".join("@"+o for o in hit) + ")")
+          print("\n".join(out))
+          PYEOF
+          )
+          if [ -n "$OUT_OF_SCOPE" ]; then
+            {
+              echo "scope_text<<SCOPE_EOF"
+              echo "🚨 OUT-OF-SCOPE EDIT — PR author @$PR_AUTHOR touched files outside their declared OWNERSHIP scope for $REPO_NAME."
+              echo ""
+              echo "Files needing an owner's approval (or a scope correction in control.efone.app → Code ownership):"
+              echo "$OUT_OF_SCOPE"
+              echo ""
+              echo "You MUST end your review with the line: BLOCK_MERGE: out-of-scope edit by @$PR_AUTHOR"
+              echo "SCOPE_EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "scope_text=✓ PR author @$PR_AUTHOR is an owner of every file changed in this PR." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch agent operating rules
+        id: fetch-agent-rules
+        continue-on-error: true
+        # Canonical R1-R15 — served by the control panel at /agent-rules.md.
+        # Public endpoint (no auth), 5-min edge cache. Survives downtime: if the
+        # fetch fails the step still emits an explanatory placeholder.
+        run: |
+          set +e
+          BODY=$(curl -sf --max-time 8 https://control.efone.app/agent-rules.md || echo '')
+          if [ -z "$BODY" ]; then
+            echo "rules_text=(agent rules feed unreachable — proceed with workflow defaults)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "rules_text<<AGENT_RULES_EOF"
+            echo "$BODY"
+            echo "AGENT_RULES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Claude code review
+        uses: anthropics/claude-code-action@v1
+        continue-on-error: true   # hybrid model — OAuth primary, API key fallback, failures don't break CI or email Waqas
+        with:
+          # Primary: Claude Max OAuth token (counts against Waqas's Max-plan quota, not API billing).
+          # Fallback: Anthropic API key (when OAuth secret isn't set on this repo — kept as backup only).
+          # The action picks OAuth when both are present; if OAuth is empty/unset it uses the API key.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Allow Dependabot to trigger AI review (default blocks all bots).
+          # The auto-merge workflow handles the actual merge for patch/minor bumps,
+          # but we still want Claude to flag suspicious changes (e.g. malicious
+          # package or major-version upgrade that introduces breaking API changes).
+          allowed_bots: "dependabot[bot]"
+          prompt: |
+            **eFone Agent Operating Rules** (canonical source: https://control.efone.app/agent-rules.md).
+            These govern how AI agents — including you — operate against eFone code.
+            They are NOT optional. If your review would violate one, flag it; if a PR violates
+            one, treat it as a critical finding.
+
+            ${{ steps.fetch-agent-rules.outputs.rules_text }}
+
+            You are reviewing a pull request against eFone, a telephony / contact-center SaaS
+            (scheduler / payroll / e-Learning / HR / feedback) used by both a web app and a
+            mobile app sharing the same backend.
+
+            **OWNERSHIP / SCOPE GATE — read first:**
+
+            ${{ steps.scope-check.outputs.scope_text }}
+
+            If the gate above says "OUT-OF-SCOPE", your review MUST end with the exact line:
+            `BLOCK_MERGE: out-of-scope edit by @<author>` and you should treat this as the
+            top finding under 🚨 Critical. Do NOT suggest "just ask an owner to approve" —
+            the policy is that the PR must be reopened by the owner, or the OWNERS map
+            updated at control.efone.app/?p=owners first.
+
+            Apply the eFone Safety Rulebook STRICTLY:
+
+            1. **API contract**: never remove/rename API fields, never change types, status
+               codes are a contract. New required request fields = breaking. The mobile app
+               can't update on demand (App Store delay) — backend stays compatible with the
+               oldest installed app version for one release cycle.
+            2. **DB & schema migrations**: backward-compatible only — read-old-AND-new then
+               migrate then read-only-new (3 deploys). Multi-document money writes use
+               transactions. Indexes built background. Money in integer cents.
+            3. **Auth & secrets**: never commit a secret. JWT key rotation = dual-verify for
+               ~7d. Webhook secrets rotate sender-first.
+            4. **Deploy & release**: CI green before merge. Staging → smoke → prod. pm2
+               reload (not restart). pm2 save + pm2 startup required. Frontend config from
+               env at runtime, NEVER bundle-baked. Module-federation React singleton.
+            5. **Webhooks & integrations**: HMAC verify mandatory. Idempotent on event_id.
+               Outbound calls wrap try/catch + timeout + retry.
+            6. **Data deletion**: soft-delete only. DROP/TRUNCATE = two-person approval +
+               snapshot. Backups aren't backups until restored.
+            7. **Observability**: every prod handler try/catch + Sentry. instrument.js loads
+               dotenv BEFORE Sentry.init.
+
+            **LEARNED RULES** from Waqas's prior approvals on control.efone.app —
+            apply alongside the static Rulebook above:
+
+            ${{ steps.fetch-rules.outputs.rules_text }}
+
+            For each finding classify severity:
+            - **CRITICAL**: would break prod / leak data / violate auth / corrupt money /
+              out-of-scope edit (per OWNERS gate above)
+            - **HIGH**: regression / significant bug / Rulebook violation
+            - **SUGGESTION**: code quality, not blocking
+
+            Be specific (file:line). When a learned rule applies, cite it explicitly so
+            Waqas sees the system using his accumulated guidance.
+
+            Post review as ONE comment with sections:
+            - 🚨 Critical (file:line — issue, then Fix: ...)
+            - ⚠️ High
+            - 💡 Suggestions
+            - Summary (1-3 sentences with verdict)
+
+            If ANY critical findings: end with `BLOCK_MERGE: critical findings present`.
+            If the scope gate flagged out-of-scope: end with `BLOCK_MERGE: out-of-scope edit by @<author>`.
+          claude_args: "--max-turns 8 --model claude-sonnet-4-6"
+
+      - name: Block merge if critical findings present
+        if: always()
+        run: |
+          COMMENTS=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" --jq '.[-3:][].body' 2>/dev/null || echo "")
+          if echo "$COMMENTS" | grep -qE "BLOCK_MERGE: (critical findings present|out-of-scope edit)"; then
+            echo "::error::AI review flagged a blocker (critical findings or out-of-scope edit) — merge blocked"
+            exit 1
+          fi
+          echo "✓ no blockers; merge unblocked"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
