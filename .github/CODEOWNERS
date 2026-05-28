@@ -1,0 +1,9 @@
+# Baseline CODEOWNERS for eFone repos.
+# Required-review on protected branches falls back to this list until path-specific
+# ownership is established. Refine to per-directory owners as the team grows.
+*    @waqasmukhtar1 @kamran-octet @andrewudsoftsol-bit
+
+# Critical paths — narrower owner set (just owner + senior dev) for sensitive changes.
+.github/        @waqasmukhtar1 @kamran-octet
+/Dockerfile     @waqasmukhtar1 @kamran-octet
+/docker-compose.yml  @waqasmukhtar1 @kamran-octet
