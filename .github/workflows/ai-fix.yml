@@ -1,0 +1,151 @@
+name: AI auto-fix
+
+# eFone "Approve + Claude" path. The dashboard creates a GitHub issue with
+# label `auto-fix` + posts a comment containing `@claude`. This workflow then
+# fires Claude with the issue body as a prompt, lets it make a branch + commit
+# + open a PR. The PR then goes through the EXISTING ai-review.yml pipeline
+# (safety rulebook + ownership gate + Waqas's manual merge).
+#
+# Security: the workflow only runs on issues explicitly labeled `auto-fix` —
+# random @claude mentions in unrelated issues won't trigger Claude.
+#
+# Authentication: uses ANTHROPIC_API_KEY (counts against API billing). To swap
+# to Max-subscription quota, replace `anthropic_api_key` with
+# `claude_code_oauth_token` + the matching secret name.
+
+on:
+  issue_comment:
+    types: [created]
+  # Also allow manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to fix'
+        required: true
+        type: number
+
+permissions:
+  contents: write       # to push a fix branch
+  issues: write         # to comment + close
+  pull-requests: write  # to open the PR
+  id-token: write
+
+# Only one fix at a time per issue
+concurrency:
+  group: ai-fix-${{ github.event.issue.number || inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    # Guards:
+    #   1. Must be an issue (not a PR comment)
+    #   2. Issue must have the `auto-fix` label
+    #   3. Comment must contain @claude
+    #   4. Commenter must be an authorized eFone user (prevents drive-by)
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request == null &&
+       contains(github.event.issue.labels.*.name, 'auto-fix') &&
+       contains(github.event.comment.body, '@claude') &&
+       (github.event.comment.user.login == 'waqasmukhtar1' ||
+        github.event.comment.user.login == 'kamran-octet'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: React on the trigger comment (so the user sees we picked it up)
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X POST "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=eyes 2>&1 | head -3 || true
+
+      - name: Fetch agent operating rules
+        id: fetch-agent-rules
+        continue-on-error: true
+        # Canonical R1-R15 — served by the control panel at /agent-rules.md.
+        # Public endpoint (no auth), 5-min edge cache. Survives downtime: if the
+        # fetch fails the step still emits an explanatory placeholder.
+        run: |
+          set +e
+          BODY=$(curl -sf --max-time 8 https://control.efone.app/agent-rules.md || echo '')
+          if [ -z "$BODY" ]; then
+            echo "rules_text=(agent rules feed unreachable — proceed with workflow defaults)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "rules_text<<AGENT_RULES_EOF"
+            echo "$BODY"
+            echo "AGENT_RULES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Claude to implement the fix
+        uses: anthropics/claude-code-action@v1
+        continue-on-error: true   # hybrid model — OAuth primary, API key fallback, failures don't break CI or email Waqas
+        with:
+          # Primary: Claude Max OAuth token (counts against Waqas's Max-plan quota, not API billing).
+          # Fallback: Anthropic API key (when OAuth secret isn't set on this repo — kept as backup only).
+          # The action picks OAuth when both are present; if OAuth is empty/unset it uses the API key.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            **eFone Agent Operating Rules** (canonical source: https://control.efone.app/agent-rules.md).
+            These govern how AI agents — including you — operate against eFone code.
+            They are NOT optional. Read them BEFORE planning your fix. R3 (confirm before destructive),
+            R8 (no secrets in code), and R10 (build-id versioning for websites) are most likely to apply.
+
+            ${{ steps.fetch-agent-rules.outputs.rules_text }}
+
+            You are implementing a fix for an eFone Inbox item.
+
+            **Issue**: #${{ github.event.issue.number || inputs.issue_number }}
+            **Repo**: ${{ github.repository }}
+
+            Read the full body of issue #${{ github.event.issue.number || inputs.issue_number }} for the
+            description + acceptance criteria. The dashboard-generated body contains structured fields:
+            `**Item id**:`, `**Scope**:`, `**Severity**:`, `**Description**:`, and a section called
+            `### Safety constraints`.
+
+            **Workflow**:
+            1. Create a branch named `auto-fix/<item-id>-<short-slug>` from main.
+            2. Make the smallest change that satisfies the issue.
+            3. ONLY edit files within the declared `Scope:` glob. If you need to touch other files,
+               STOP and post a comment explaining why instead of doing it.
+            4. Run any obvious local checks (npm run lint if present, etc.) and fix what breaks.
+            5. Commit with message `auto-fix(<item-id>): <one-line summary>`.
+            6. Open a PR titled `Auto-fix: <issue title>` with body that includes:
+                - `closes #${{ github.event.issue.number || inputs.issue_number }}`
+                - A short summary of the change
+                - The file list you edited
+            7. If the issue is ambiguous or you can't safely implement, post a comment on the
+               issue explaining what's missing and DO NOT open a PR.
+
+            **Safety rules — DO NOT cross these lines**:
+            - Never modify `.github/`, `.env*`, `package.json`/`package-lock.json`,
+              `instrument.js`, `server.js`, or anything in `src/controller/onevision/auth/`,
+              `src/controller/onevision/billing/`, `src/controller/onevision/payroll/` unless
+              the issue explicitly says so + the scope glob covers it.
+            - Never delete files unless the issue explicitly says so.
+            - Never run database scripts / migrations / shell commands that touch prod.
+            - Never commit secrets. If you see a placeholder, leave it as a placeholder.
+            - If the change touches money/auth/schema, refuse and post a comment saying
+              "Out of safe-fix scope — needs human implementation."
+
+            Your PR will be reviewed by the existing AI-review CI (a separate Claude run with
+            the safety rulebook + ownership gate). If you violate the safety rules or scope,
+            it will BLOCK_MERGE. Save yourself rework — stay strictly in scope.
+          claude_args: "--max-turns 30 --model claude-sonnet-4-6"
+
+      - name: On failure, leave a comment on the issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment ${{ github.event.issue.number || inputs.issue_number }} \
+            --repo ${{ github.repository }} \
+            --body "❌ Auto-fix workflow failed. Check the workflow run for details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
