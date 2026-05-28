@@ -122,14 +122,18 @@ jobs:
 
             **Safety rules — DO NOT cross these lines**:
             - Never modify `.github/`, `.env*`, `package.json`/`package-lock.json`,
-              `instrument.js`, `server.js`, or anything in `src/controller/onevision/auth/`,
-              `src/controller/onevision/billing/`, `src/controller/onevision/payroll/` unless
+              `server.js`, anything in `src/controllers/admin/auth/` or
+              `src/controllers/v5/admin/`, anything in `src/services/accounts.service.*`,
+              the FreeSWITCH/STUN/TURN config dirs, or any file matching
+              `*billing*`, `*payment*`, `*payroll*`, `*money*`, `*subscription*` unless
               the issue explicitly says so + the scope glob covers it.
             - Never delete files unless the issue explicitly says so.
             - Never run database scripts / migrations / shell commands that touch prod.
+              eFone shares one Mongo cluster (`v4-business-dev-mongodb`) for dev + prod —
+              destructive writes affect customer data, refuse them.
             - Never commit secrets. If you see a placeholder, leave it as a placeholder.
-            - If the change touches money/auth/schema, refuse and post a comment saying
-              "Out of safe-fix scope — needs human implementation."
+            - If the change touches money/auth/schema/telephony-routing, refuse and post
+              a comment saying "Out of safe-fix scope — needs human implementation."
 
             Your PR will be reviewed by the existing AI-review CI (a separate Claude run with
             the safety rulebook + ownership gate). If you violate the safety rules or scope,
