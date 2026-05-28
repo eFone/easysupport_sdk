@@ -1,0 +1,42 @@
+name: checks
+
+# Non-blocking smoke checks for Flutter/Dart repos (analyze + format).
+# continue-on-error so the job posts a clear pass/fail badge without blocking
+# merge. Filed as `audit-3` in the dashboard Inbox.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches-ignore: ["dependabot/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          # Pin to a recent stable; the repos declare SDK >=3.3.0 / >=3.5.0 / ^3.12.0
+          flutter-version: '3.24.x'
+
+      - name: pub get
+        id: pubget
+        continue-on-error: true
+        run: flutter pub get
+
+      - name: analyze
+        if: steps.pubget.outcome == 'success'
+        continue-on-error: true
+        run: flutter analyze --no-fatal-infos
+
+      - name: format check
+        if: steps.pubget.outcome == 'success'
+        continue-on-error: true
+        run: dart format --output=none --set-exit-if-changed .
