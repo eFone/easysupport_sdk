@@ -9,9 +9,7 @@ name: AI auto-fix
 # Security: the workflow only runs on issues explicitly labeled `auto-fix` —
 # random @claude mentions in unrelated issues won't trigger Claude.
 #
-# Authentication: uses ANTHROPIC_API_KEY (counts against API billing). To swap
-# to Max-subscription quota, replace `anthropic_api_key` with
-# `claude_code_oauth_token` + the matching secret name.
+# Authentication: handled by the Claude GitHub App (installed on the eFone org).
 
 on:
   issue_comment:
@@ -88,11 +86,8 @@ jobs:
         uses: anthropics/claude-code-action@v1
         continue-on-error: true   # hybrid model — OAuth primary, API key fallback, failures don't break CI or email Waqas
         with:
-          # Primary: Claude Max OAuth token (counts against Waqas's Max-plan quota, not API billing).
-          # Fallback: Anthropic API key (when OAuth secret isn't set on this repo — kept as backup only).
-          # The action picks OAuth when both are present; if OAuth is empty/unset it uses the API key.
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Auth: handled by the Claude GitHub App installation on the eFone org
+          # (app_slug "claude", repo_selection "all"). No secret needed.
           prompt: |
             **eFone Agent Operating Rules** (canonical source: https://control.efone.app/agent-rules.md).
             These govern how AI agents — including you — operate against eFone code.
