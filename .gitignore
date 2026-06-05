@@ -27,3 +27,20 @@ migrate_working_dir/
 **/doc/api/
 .dart_tool/
 build/
+
+# secret-file rules (T13 guard-gap)
+.env
+.env.*
+!.env*.example
+!.env*.template
+!.env*.sample
+*.p8
+*serviceAccount*.json
+firebaseAdminKeys*.json
+*-adminsdk-*.json
+*.pem
+*.key
+*.pfx
+*.p12
+credentials*.json
+zohoAccessToken.json

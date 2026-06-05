@@ -1,0 +1,12 @@
+# gitleaks config — block NEW secrets from entering the repo (T13 / R79 / R83).
+# Allowlist = LEGACY already-known files pending T13 rotate+purge (D1 inventory
+# 2026-06-05). They are being remediated separately; this gate stops new leaks.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Legacy known files pending T13 rotate+purge"
+paths = [
+  '''test/.*\.dart'''
+]

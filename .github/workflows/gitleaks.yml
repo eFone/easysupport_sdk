@@ -1,0 +1,24 @@
+name: gitleaks
+
+# Secret-scanning gate (T13 / R79 / R83). Scans the CURRENT working tree (not git
+# history) so it stays green once the codebase is clean, while still blocking any
+# NEW secret added to the tree. Legacy already-known key/token files are
+# allowlisted in .gitleaks.toml; rotating + removing them from history is T13 Step B.
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  gitleaks:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: gitleaks (working tree)
+        run: |
+          VERSION=8.21.2
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" -o gl.tgz
+          tar -xzf gl.tgz gitleaks
+          ./gitleaks detect --no-git --source . --config .gitleaks.toml --redact --exit-code 1
