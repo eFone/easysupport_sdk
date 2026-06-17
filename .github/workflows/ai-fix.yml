@@ -47,7 +47,7 @@ jobs:
        contains(github.event.comment.body, '@claude') &&
        (github.event.comment.user.login == 'waqasmukhtar1' ||
         github.event.comment.user.login == 'kamran-octet'))
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, common-services]
     timeout-minutes: 20
     steps:
       - name: Checkout
