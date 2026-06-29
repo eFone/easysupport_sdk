@@ -15,7 +15,7 @@ jobs:
     name: secret scan
     runs-on: [self-hosted, common-services]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: gitleaks (working tree)
         run: |
           VERSION=8.21.2
