@@ -142,7 +142,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Claude code review
-        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1
+        uses: anthropics/claude-code-action@6c0083bb7289c31716797a039b6367b3079cc46e # v1
         continue-on-error: true   # hybrid model — OAuth primary, API key fallback, failures don't break CI or email Waqas
         with:
           # Auth: handled by the Claude GitHub App installation on the eFone org
